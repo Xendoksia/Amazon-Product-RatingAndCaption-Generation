@@ -15,7 +15,7 @@ import warnings
 warnings.filterwarnings('ignore')
 
 class ProductImageDataset(Dataset):
-    """Dataset class for product images and ratings with metadata features"""
+    """Dataset class for product images and ratings"""
     
     def __init__(self, metadata_csv, images_dir, transform=None, main_images_only=True):
         self.metadata = pd.read_csv(metadata_csv)
@@ -34,43 +34,7 @@ class ProductImageDataset(Dataset):
         # Filter out missing images upfront
         self.metadata = self._filter_existing_images()
         
-        # Prepare categorical encoders
-        self._prepare_categorical_features()
-        
         print(f"Dataset initialized with {len(self.metadata)} samples (from {initial_count} total)")
-    
-    def _prepare_categorical_features(self):
-        """Prepare categorical feature encodings"""
-        from sklearn.preprocessing import LabelEncoder
-        
-        # Initialize encoders
-        self.category_encoder = LabelEncoder()
-        self.store_encoder = LabelEncoder()
-        self.variant_encoder = LabelEncoder()
-        
-        # Handle missing values and encode
-        self.metadata['category_clean'] = self.metadata['category'].fillna('unknown')
-        self.metadata['store_clean'] = self.metadata['store'].fillna('unknown')
-        self.metadata['variant_clean'] = self.metadata['variant'].fillna('MAIN')
-        
-        # Fit encoders
-        self.category_encoder.fit(self.metadata['category_clean'])
-        self.store_encoder.fit(self.metadata['store_clean'])
-        self.variant_encoder.fit(self.metadata['variant_clean'])
-        
-        # Encode categories
-        self.metadata['category_encoded'] = self.category_encoder.transform(self.metadata['category_clean'])
-        self.metadata['store_encoded'] = self.store_encoder.transform(self.metadata['store_clean'])
-        self.metadata['variant_encoded'] = self.variant_encoder.transform(self.metadata['variant_clean'])
-        
-        # Normalize rating_count
-        max_rating_count = self.metadata['rating_count'].max()
-        self.metadata['rating_count_norm'] = self.metadata['rating_count'] / max_rating_count
-        
-        print(f"Categorical features prepared:")
-        print(f"  - Categories: {len(self.category_encoder.classes_)}")
-        print(f"  - Stores: {len(self.store_encoder.classes_)}")
-        print(f"  - Variants: {len(self.variant_encoder.classes_)}")
     
     def _filter_existing_images(self):
         """Filter out rows where image files don't exist"""
@@ -119,117 +83,9 @@ class ProductImageDataset(Dataset):
         # Get rating (ensure it's float32 for PyTorch)
         rating = float(row['rating'])
         
-        # Prepare metadata features
-        metadata_features = torch.tensor([
-            row['category_encoded'],
-            row['store_encoded'], 
-            row['variant_encoded'],
-            row['rating_count_norm']
-        ], dtype=torch.float32)
-        
-        return image, metadata_features, rating, row['product_id']
+        return image, rating, row['product_id']
 
-class TwoTowerRatingModel(nn.Module):
-    """Two Tower Architecture for Rating Prediction
-    
-    Tower 1: Visual features from images (CNN)
-    Tower 2: Metadata features (categorical + numerical)
-    Final: Combined prediction head
-    """
-    
-    def __init__(self, backbone='efficientnet', pretrained=True, 
-                 num_categories=50, num_stores=100, num_variants=10, dropout=0.3):
-        super(TwoTowerRatingModel, self).__init__()
-        
-        self.backbone_name = backbone
-        
-        # TOWER 1: Visual Feature Extractor
-        if backbone == 'resnet50':
-            self.visual_backbone = models.resnet50(pretrained=pretrained)
-            visual_features = self.visual_backbone.fc.in_features
-            self.visual_backbone.fc = nn.Identity()
-        elif backbone == 'resnet18':
-            self.visual_backbone = models.resnet18(pretrained=pretrained)
-            visual_features = self.visual_backbone.fc.in_features
-            self.visual_backbone.fc = nn.Identity()
-        elif backbone == 'efficientnet':
-            self.visual_backbone = models.efficientnet_b0(pretrained=pretrained)
-            visual_features = self.visual_backbone.classifier[1].in_features
-            self.visual_backbone.classifier = nn.Identity()
-        else:
-            raise ValueError(f"Unsupported backbone: {backbone}")
-        
-        # Visual tower head
-        self.visual_tower = nn.Sequential(
-            nn.Dropout(dropout),
-            nn.Linear(visual_features, 512),
-            nn.ReLU(),
-            nn.Dropout(dropout * 0.7),
-            nn.Linear(512, 256),
-            nn.ReLU(),
-            nn.Linear(256, 128)
-        )
-        
-        # TOWER 2: Metadata Feature Processor
-        # Embedding layers for categorical features
-        self.category_embedding = nn.Embedding(num_categories, 32)
-        self.store_embedding = nn.Embedding(num_stores, 16) 
-        self.variant_embedding = nn.Embedding(num_variants, 8)
-        
-        # Metadata tower (categorical embeddings + numerical features)
-        metadata_input_size = 32 + 16 + 8 + 1  # embeddings + rating_count_norm
-        self.metadata_tower = nn.Sequential(
-            nn.Linear(metadata_input_size, 128),
-            nn.ReLU(),
-            nn.Dropout(dropout * 0.5),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, 32)
-        )
-        
-        # FUSION: Combined prediction head
-        combined_input_size = 128 + 32  # visual_tower + metadata_tower
-        self.fusion_head = nn.Sequential(
-            nn.Linear(combined_input_size, 128),
-            nn.ReLU(),
-            nn.Dropout(dropout * 0.5),
-            nn.Linear(128, 64),
-            nn.ReLU(),
-            nn.Linear(64, 32),
-            nn.ReLU(),
-            nn.Linear(32, 1)
-        )
-    
-    def forward(self, images, metadata_features):
-        # Tower 1: Visual features
-        visual_features = self.visual_backbone(images)
-        visual_output = self.visual_tower(visual_features)
-        
-        # Tower 2: Metadata features
-        # Extract and embed categorical features
-        category_idx = metadata_features[:, 0].long()
-        store_idx = metadata_features[:, 1].long() 
-        variant_idx = metadata_features[:, 2].long()
-        rating_count_norm = metadata_features[:, 3:4]  # Keep as 2D
-        
-        category_emb = self.category_embedding(category_idx)
-        store_emb = self.store_embedding(store_idx)
-        variant_emb = self.variant_embedding(variant_idx)
-        
-        # Combine metadata features
-        metadata_combined = torch.cat([
-            category_emb, store_emb, variant_emb, rating_count_norm
-        ], dim=1)
-        
-        metadata_output = self.metadata_tower(metadata_combined)
-        
-        # Fusion: Combine both towers
-        combined_features = torch.cat([visual_output, metadata_output], dim=1)
-        final_output = self.fusion_head(combined_features)
-        
-        return final_output.squeeze()
-
-# Keep the original model for backward compatibility
+# Original simple CNN model for rating prediction
 class RatingPredictionModel(nn.Module):
     """Neural network model for rating prediction"""
     
@@ -390,17 +246,16 @@ class RatingPredictor:
             train_targets = []
             
             train_pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Train]')
-            for batch_idx, (images, metadata, ratings, _) in enumerate(train_pbar):
-                images, metadata, ratings = images.to(self.device), metadata.to(self.device), ratings.to(self.device, dtype=torch.float32)
+            for batch_idx, batch_data in enumerate(train_pbar):
+                if len(batch_data) == 3:  # Original format: image, rating, product_id
+                    images, ratings, _ = batch_data
+                    images, ratings = images.to(self.device), ratings.to(self.device, dtype=torch.float32)
+                else:  # Extended format with metadata
+                    images, metadata, ratings, _ = batch_data
+                    images, ratings = images.to(self.device), ratings.to(self.device, dtype=torch.float32)
                 
                 optimizer.zero_grad()
-                
-                # Check if model is Two Tower
-                if hasattr(model, 'fusion_head'):  # Two Tower model
-                    outputs = model(images, metadata)
-                else:  # Original single tower model
-                    outputs = model(images)
-                    
+                outputs = model(images)
                 loss = criterion(outputs, ratings)
                 loss.backward()
                 optimizer.step()
@@ -423,15 +278,15 @@ class RatingPredictor:
             
             with torch.no_grad():
                 val_pbar = tqdm(val_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Val]')
-                for batch_idx, (images, metadata, ratings, _) in enumerate(val_pbar):
-                    images, metadata, ratings = images.to(self.device), metadata.to(self.device), ratings.to(self.device, dtype=torch.float32)
+                for batch_idx, batch_data in enumerate(val_pbar):
+                    if len(batch_data) == 3:  # Original format
+                        images, ratings, _ = batch_data
+                        images, ratings = images.to(self.device), ratings.to(self.device, dtype=torch.float32)
+                    else:  # Extended format with metadata
+                        images, metadata, ratings, _ = batch_data
+                        images, ratings = images.to(self.device), ratings.to(self.device, dtype=torch.float32)
                     
-                    # Check if model is Two Tower
-                    if hasattr(model, 'fusion_head'):  # Two Tower model
-                        outputs = model(images, metadata)
-                    else:  # Original single tower model
-                        outputs = model(images)
-                        
+                    outputs = model(images)
                     loss = criterion(outputs, ratings)
                     
                     val_loss += loss.item()
@@ -492,20 +347,20 @@ class RatingPredictor:
         """Evaluate model performance on test set"""
         model.eval()
         model.to(self.device)
-        
         predictions = []
         targets = []
         product_ids = []
         
         with torch.no_grad():
-            for images, metadata, ratings, p_ids in tqdm(test_loader, desc='Evaluating'):
-                images, metadata, ratings = images.to(self.device), metadata.to(self.device), ratings.to(self.device, dtype=torch.float32)
+            for batch_data in tqdm(test_loader, desc='Evaluating'):
+                if len(batch_data) == 3:  # Original format: image, rating, product_id
+                    images, ratings, p_ids = batch_data
+                    images, ratings = images.to(self.device), ratings.to(self.device, dtype=torch.float32)
+                else:  # Extended format with metadata
+                    images, metadata, ratings, p_ids = batch_data
+                    images, ratings = images.to(self.device), ratings.to(self.device, dtype=torch.float32)
                 
-                # Check if model is Two Tower
-                if hasattr(model, 'fusion_head'):  # Two Tower model
-                    outputs = model(images, metadata)
-                else:  # Original single tower model
-                    outputs = model(images)
+                outputs = model(images)
                 
                 predictions.extend(outputs.cpu().numpy().flatten())
                 targets.extend(ratings.cpu().numpy().flatten())
@@ -611,7 +466,7 @@ class RatingPredictor:
         plt.show()
     
     def train_and_evaluate(self, backbone='resnet50', batch_size=16, num_epochs=50, 
-                          learning_rate=0.001, augment=True, use_two_tower=True):
+                          learning_rate=0.001, augment=True):
         """Complete training and evaluation pipeline"""
         print("Starting Rating Prediction Training Pipeline")
         print("=" * 60)
@@ -622,29 +477,8 @@ class RatingPredictor:
             self.create_data_loaders(batch_size, augment=augment)
         
         # Create model
-        if use_two_tower:
-            print(f"Creating Two Tower {backbone} model...")
-            
-            # Get dataset info for embedding dimensions
-            sample_dataset = train_dataset.metadata
-            num_categories = len(train_dataset.category_encoder.classes_)
-            num_stores = len(train_dataset.store_encoder.classes_)
-            num_variants = len(train_dataset.variant_encoder.classes_)
-            
-            model = TwoTowerRatingModel(
-                backbone=backbone, 
-                pretrained=True, 
-                num_categories=num_categories,
-                num_stores=num_stores,
-                num_variants=num_variants,
-                dropout=0.3
-            )
-            print(f"Two Tower Architecture:")
-            print(f"  - Visual Tower: {backbone}")
-            print(f"  - Metadata Tower: {num_categories} categories, {num_stores} stores, {num_variants} variants")
-        else:
-            print(f"Creating single tower {backbone} model...")
-            model = RatingPredictionModel(backbone=backbone, pretrained=True, dropout=0.3)
+        print(f"Creating {backbone} model...")
+        model = RatingPredictionModel(backbone=backbone, pretrained=True, dropout=0.3)
         
         print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
         print(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
@@ -698,12 +532,11 @@ if __name__ == "__main__":
     # Initialize trainer
     trainer = RatingPredictor(dataset_dir='product_dataset', model_save_dir='models')
     
-    # Train and evaluate model with Two Tower Architecture
+    # Train and evaluate model
     model, results = trainer.train_and_evaluate(
         backbone='efficientnet',
         batch_size=32,
         num_epochs=40, 
         learning_rate=0.0003,
-        augment=True,
-        use_two_tower=True  # Enable Two Tower Architecture
+        augment=True
     )
