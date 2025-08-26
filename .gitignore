@@ -1,0 +1,16 @@
+/product_dataset
+/product_dataset
+/product_dataset
+*.csv
+models/best_model.pth
+src/meta_Amazon_Fashion.jsonl
+src/meta_Amazon_Fashion_shrunk_300k.jsonl
+/src
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tiff
+*.svg
+analysis_results/analysisResults.txt

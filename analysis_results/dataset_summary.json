@@ -1,0 +1,21 @@
+{
+  "total_records": 826108,
+  "valid_records": 66243,
+  "total_images": 299999,
+  "rating_stats": {
+    "count": 66243.0,
+    "mean": 3.9152076445813146,
+    "std": 0.9864854715722635,
+    "min": 1.0,
+    "25%": 3.4,
+    "50%": 4.0,
+    "75%": 4.7,
+    "max": 5.0
+  },
+  "categories": [
+    "AMAZON FASHION"
+  ],
+  "avg_images_per_product": 4.528765303503766,
+  "dataset_shrunk": true,
+  "analysis_date": "2025-08-26T11:39:37.816858"
+}
