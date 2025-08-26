@@ -14,6 +14,15 @@ from tqdm import tqdm
 import warnings
 warnings.filterwarnings('ignore')
 
+# Try to import timm for Vision Transformer models
+try:
+    import timm
+    TIMM_AVAILABLE = True
+    print("✅ timm library found - Vision Transformer models available")
+except ImportError:
+    TIMM_AVAILABLE = False
+    print("❌ timm library not found - install with: pip install timm")
+
 class ProductImageDataset(Dataset):
     """Dataset class for product images and ratings"""
     
@@ -85,14 +94,81 @@ class ProductImageDataset(Dataset):
         
         return image, rating, row['product_id']
 
-# Original simple CNN model for rating prediction
 class RatingPredictionModel(nn.Module):
-    """Neural network model for rating prediction"""
+    """Neural network model for rating prediction supporting CNN and ViT architectures"""
     
     def __init__(self, backbone='resnet50', pretrained=True, num_classes=1, dropout=0.5):
         super(RatingPredictionModel, self).__init__()
         
         self.backbone_name = backbone
+        
+        # Check if requesting Vision Transformer
+        if backbone.startswith('vit') or backbone.startswith('deit') or backbone.startswith('swin'):
+            if not TIMM_AVAILABLE:
+                raise ImportError("Vision Transformer models require timm library. Install with: pip install timm")
+            self._create_vit_backbone(backbone, pretrained, dropout)
+        else:
+            self._create_cnn_backbone(backbone, pretrained, dropout)
+    
+    def _create_vit_backbone(self, backbone, pretrained, dropout):
+        """Create Vision Transformer backbone"""
+        print(f"🤖 Creating Vision Transformer: {backbone}")
+        
+        # Map common ViT model names
+        vit_models = {
+            'vit_small': 'vit_small_patch16_224',
+            'vit_base': 'vit_base_patch16_224', 
+            'vit_large': 'vit_large_patch16_224',
+            'deit_small': 'deit_small_patch16_224',
+            'deit_base': 'deit_base_patch16_224',
+            'swin_small': 'swin_small_patch4_window7_224',
+            'swin_base': 'swin_base_patch4_window7_224'
+        }
+        
+        model_name = vit_models.get(backbone, backbone)
+        
+        try:
+            # Create ViT model using timm
+            self.backbone = timm.create_model(
+                model_name, 
+                pretrained=pretrained,
+                num_classes=0  # Remove classification head
+            )
+            
+            # Get feature dimension
+            with torch.no_grad():
+                dummy_input = torch.randn(1, 3, 224, 224)
+                features = self.backbone(dummy_input)
+                num_features = features.shape[1]
+            
+            print(f"✅ ViT backbone created: {num_features} features")
+            
+        except Exception as e:
+            print(f"❌ Failed to create {model_name}: {e}")
+            print("📋 Available ViT models:")
+            available_vits = [name for name in timm.list_models() if 'vit' in name or 'deit' in name or 'swin' in name][:10]
+            for model in available_vits:
+                print(f"   - {model}")
+            raise
+        
+        # Custom classifier head for ViT
+        self.classifier = nn.Sequential(
+            nn.LayerNorm(num_features),  # ViTs often use LayerNorm
+            nn.Dropout(dropout),
+            nn.Linear(num_features, 512),
+            nn.GELU(),  # ViTs typically use GELU activation
+            nn.Dropout(dropout * 0.7),
+            nn.Linear(512, 256),
+            nn.GELU(),
+            nn.Dropout(dropout * 0.5),
+            nn.Linear(256, 128),
+            nn.GELU(),
+            nn.Linear(128, num_classes)
+        )
+        
+    def _create_cnn_backbone(self, backbone, pretrained, dropout):
+        """Create CNN backbone (original implementation)"""
+        print(f"🔧 Creating CNN backbone: {backbone}")
         
         # Load backbone
         if backbone == 'resnet50':
@@ -108,9 +184,9 @@ class RatingPredictionModel(nn.Module):
             num_features = self.backbone.classifier[1].in_features
             self.backbone.classifier = nn.Identity()
         else:
-            raise ValueError(f"Unsupported backbone: {backbone}")
+            raise ValueError(f"Unsupported CNN backbone: {backbone}")
         
-        # Custom classifier head
+        # Custom classifier head for CNN
         self.classifier = nn.Sequential(
             nn.Dropout(dropout),
             nn.Linear(num_features, 512),
