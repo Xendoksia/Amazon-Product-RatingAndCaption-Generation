@@ -14,54 +14,34 @@ from tqdm import tqdm
 import warnings
 warnings.filterwarnings('ignore')
 
-# Try to import timm for Vision Transformer models
-try:
-    import timm
-    TIMM_AVAILABLE = True
-    print("✅ timm library found - Vision Transformer models available")
-except ImportError:
-    TIMM_AVAILABLE = False
-    print("❌ timm library not found - install with: pip install timm")
-
 class ProductImageDataset(Dataset):
     """Dataset class for product images and ratings"""
     
-    def __init__(self, metadata_csv, images_dir, transform=None, main_images_only=True):
+    def __init__(self, metadata_csv, images_dir, transform=None):
         self.metadata = pd.read_csv(metadata_csv)
         self.images_dir = images_dir
         self.transform = transform
         
-        initial_count = len(self.metadata)
-        
-        # Filter for main images only if specified
-        if main_images_only:
-            self.metadata = self.metadata[self.metadata['is_main'] == True]
-        
         # Remove any rows with missing ratings
         self.metadata = self.metadata.dropna(subset=['rating'])
         
-        # Filter out missing images upfront
-        self.metadata = self._filter_existing_images()
-        
-        print(f"Dataset initialized with {len(self.metadata)} samples (from {initial_count} total)")
-    
-    def _filter_existing_images(self):
-        """Filter out rows where image files don't exist"""
-        existing_mask = []
-        missing_count = 0
+        # Filter out rows where image files don't exist
+        before_count = len(self.metadata)
+        existing_files = []
         
         for idx, row in self.metadata.iterrows():
             image_path = os.path.join(self.images_dir, row['filename'])
             if os.path.exists(image_path):
-                existing_mask.append(True)
-            else:
-                existing_mask.append(False)
-                missing_count += 1
+                existing_files.append(idx)
         
-        if missing_count > 0:
-            print(f"Warning: Skipped {missing_count} samples with missing image files")
+        self.metadata = self.metadata.loc[existing_files].reset_index(drop=True)
+        after_count = len(self.metadata)
         
-        return self.metadata[existing_mask].reset_index(drop=True)
+        if before_count != after_count:
+            print(f"Filtered dataset: {before_count} -> {after_count} samples (removed {before_count - after_count} missing files)")
+        else:
+            print(f"Dataset initialized with {after_count} samples")
+    
     
     def __len__(self):
         return len(self.metadata)
@@ -74,101 +54,27 @@ class ProductImageDataset(Dataset):
         
         try:
             image = Image.open(image_path).convert('RGB')
-        except FileNotFoundError:
-            # This should not happen after filtering, but just in case
-            print(f"Error: Image file missing during training: {image_path}")
-            # Create a neutral gray image as fallback
-            image = Image.new('RGB', (224, 224), color=(128, 128, 128))
         except Exception as e:
-            # Handle corrupted images or other PIL errors
+            # Return a black image if file is corrupted
             print(f"Warning: Could not load image {image_path}: {e}")
-            # Create a neutral gray image as fallback
-            image = Image.new('RGB', (224, 224), color=(128, 128, 128))
+            image = Image.new('RGB', (224, 224), color='black')
         
         # Apply transforms
         if self.transform:
             image = self.transform(image)
         
-        # Get rating (ensure it's float32 for PyTorch)
-        rating = float(row['rating'])
+        # Get rating (ensure float32 type)
+        rating = torch.tensor(float(row['rating']), dtype=torch.float32)
         
         return image, rating, row['product_id']
 
 class RatingPredictionModel(nn.Module):
-    """Neural network model for rating prediction supporting CNN and ViT architectures"""
+    """Neural network model for rating prediction"""
     
-    def __init__(self, backbone='resnet50', pretrained=True, num_classes=1, dropout=0.5):
+    def __init__(self, backbone='resnet50', pretrained=True, dropout=0.5):
         super(RatingPredictionModel, self).__init__()
         
         self.backbone_name = backbone
-        
-        # Check if requesting Vision Transformer
-        if backbone.startswith('vit') or backbone.startswith('deit') or backbone.startswith('swin'):
-            if not TIMM_AVAILABLE:
-                raise ImportError("Vision Transformer models require timm library. Install with: pip install timm")
-            self._create_vit_backbone(backbone, pretrained, dropout)
-        else:
-            self._create_cnn_backbone(backbone, pretrained, dropout)
-    
-    def _create_vit_backbone(self, backbone, pretrained, dropout):
-        """Create Vision Transformer backbone"""
-        print(f"🤖 Creating Vision Transformer: {backbone}")
-        
-        # Map common ViT model names
-        vit_models = {
-            'vit_small': 'vit_small_patch16_224',
-            'vit_base': 'vit_base_patch16_224', 
-            'vit_large': 'vit_large_patch16_224',
-            'deit_small': 'deit_small_patch16_224',
-            'deit_base': 'deit_base_patch16_224',
-            'swin_small': 'swin_small_patch4_window7_224',
-            'swin_base': 'swin_base_patch4_window7_224'
-        }
-        
-        model_name = vit_models.get(backbone, backbone)
-        
-        try:
-            # Create ViT model using timm
-            self.backbone = timm.create_model(
-                model_name, 
-                pretrained=pretrained,
-                num_classes=0  # Remove classification head
-            )
-            
-            # Get feature dimension
-            with torch.no_grad():
-                dummy_input = torch.randn(1, 3, 224, 224)
-                features = self.backbone(dummy_input)
-                num_features = features.shape[1]
-            
-            print(f"✅ ViT backbone created: {num_features} features")
-            
-        except Exception as e:
-            print(f"❌ Failed to create {model_name}: {e}")
-            print("📋 Available ViT models:")
-            available_vits = [name for name in timm.list_models() if 'vit' in name or 'deit' in name or 'swin' in name][:10]
-            for model in available_vits:
-                print(f"   - {model}")
-            raise
-        
-        # Custom classifier head for ViT
-        self.classifier = nn.Sequential(
-            nn.LayerNorm(num_features),  # ViTs often use LayerNorm
-            nn.Dropout(dropout),
-            nn.Linear(num_features, 512),
-            nn.GELU(),  # ViTs typically use GELU activation
-            nn.Dropout(dropout * 0.7),
-            nn.Linear(512, 256),
-            nn.GELU(),
-            nn.Dropout(dropout * 0.5),
-            nn.Linear(256, 128),
-            nn.GELU(),
-            nn.Linear(128, num_classes)
-        )
-        
-    def _create_cnn_backbone(self, backbone, pretrained, dropout):
-        """Create CNN backbone (original implementation)"""
-        print(f"🔧 Creating CNN backbone: {backbone}")
         
         # Load backbone
         if backbone == 'resnet50':
@@ -184,9 +90,9 @@ class RatingPredictionModel(nn.Module):
             num_features = self.backbone.classifier[1].in_features
             self.backbone.classifier = nn.Identity()
         else:
-            raise ValueError(f"Unsupported CNN backbone: {backbone}")
+            raise ValueError(f"Unsupported backbone: {backbone}")
         
-        # Custom classifier head for CNN
+        # Custom classifier head
         self.classifier = nn.Sequential(
             nn.Dropout(dropout),
             nn.Linear(num_features, 512),
@@ -197,7 +103,7 @@ class RatingPredictionModel(nn.Module):
             nn.Dropout(dropout * 0.5),
             nn.Linear(256, 128),
             nn.ReLU(),
-            nn.Linear(128, num_classes)
+            nn.Linear(128, 1)
         )
     
     def forward(self, x):
@@ -322,13 +228,8 @@ class RatingPredictor:
             train_targets = []
             
             train_pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Train]')
-            for batch_idx, batch_data in enumerate(train_pbar):
-                if len(batch_data) == 3:  # Original format: image, rating, product_id
-                    images, ratings, _ = batch_data
-                    images, ratings = images.to(self.device), ratings.to(self.device, dtype=torch.float32)
-                else:  # Extended format with metadata
-                    images, metadata, ratings, _ = batch_data
-                    images, ratings = images.to(self.device), ratings.to(self.device, dtype=torch.float32)
+            for batch_idx, (images, ratings, _) in enumerate(train_pbar):
+                images, ratings = images.to(self.device), ratings.to(self.device, dtype=torch.float32)
                 
                 optimizer.zero_grad()
                 outputs = model(images)
@@ -337,8 +238,8 @@ class RatingPredictor:
                 optimizer.step()
                 
                 train_loss += loss.item()
-                train_predictions.extend(outputs.detach().cpu().numpy().flatten())
-                train_targets.extend(ratings.detach().cpu().numpy().flatten())
+                train_predictions.extend(outputs.detach().cpu().numpy())
+                train_targets.extend(ratings.detach().cpu().numpy())
                 
                 # Update progress bar
                 train_pbar.set_postfix({
@@ -354,20 +255,15 @@ class RatingPredictor:
             
             with torch.no_grad():
                 val_pbar = tqdm(val_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Val]')
-                for batch_idx, batch_data in enumerate(val_pbar):
-                    if len(batch_data) == 3:  # Original format
-                        images, ratings, _ = batch_data
-                        images, ratings = images.to(self.device), ratings.to(self.device, dtype=torch.float32)
-                    else:  # Extended format with metadata
-                        images, metadata, ratings, _ = batch_data
-                        images, ratings = images.to(self.device), ratings.to(self.device, dtype=torch.float32)
+                for batch_idx, (images, ratings, _) in enumerate(val_pbar):
+                    images, ratings = images.to(self.device), ratings.to(self.device, dtype=torch.float32)
                     
                     outputs = model(images)
                     loss = criterion(outputs, ratings)
                     
                     val_loss += loss.item()
-                    val_predictions.extend(outputs.cpu().numpy().flatten())
-                    val_targets.extend(ratings.cpu().numpy().flatten())
+                    val_predictions.extend(outputs.cpu().numpy())
+                    val_targets.extend(ratings.cpu().numpy())
                     
                     val_pbar.set_postfix({
                         'loss': f'{loss.item():.4f}',
@@ -423,24 +319,19 @@ class RatingPredictor:
         """Evaluate model performance on test set"""
         model.eval()
         model.to(self.device)
+        
         predictions = []
         targets = []
         product_ids = []
         
         with torch.no_grad():
-            for batch_data in tqdm(test_loader, desc='Evaluating'):
-                if len(batch_data) == 3:  # Original format: image, rating, product_id
-                    images, ratings, p_ids = batch_data
-                    images, ratings = images.to(self.device), ratings.to(self.device, dtype=torch.float32)
-                else:  # Extended format with metadata
-                    images, metadata, ratings, p_ids = batch_data
-                    images, ratings = images.to(self.device), ratings.to(self.device, dtype=torch.float32)
-                
+            for images, ratings, p_ids in tqdm(test_loader, desc='Evaluating'):
+                images, ratings = images.to(self.device), ratings.to(self.device, dtype=torch.float32)
                 outputs = model(images)
                 
-                predictions.extend(outputs.cpu().numpy().flatten())
-                targets.extend(ratings.cpu().numpy().flatten())
-                product_ids.extend(p_ids.numpy().flatten())
+                predictions.extend(outputs.cpu().numpy())
+                targets.extend(ratings.cpu().numpy())
+                product_ids.extend(p_ids.numpy())
         
         # Calculate metrics
         mse = mean_squared_error(targets, predictions)
@@ -542,19 +433,23 @@ class RatingPredictor:
         plt.show()
     
     def train_and_evaluate(self, backbone='resnet50', batch_size=16, num_epochs=50, 
-                          learning_rate=0.001, augment=True):
+                          learning_rate=0.001, augment=True, dropout=0.5):
         """Complete training and evaluation pipeline"""
-        print("Starting Rating Prediction Training Pipeline")
+        print("🚀 Starting Rating Prediction Training Pipeline")
         print("=" * 60)
+        print(f"📦 Model: {backbone}")
+        print(f"🔧 Config: {batch_size} batch, {num_epochs} epochs, LR {learning_rate}")
+        print(f"📊 Dropout: {dropout}, Augment: {augment}")
+        print()
         
         # Create data loaders
-        print("Creating data loaders...")
+        print("📁 Creating data loaders...")
         train_loader, val_loader, test_loader, train_dataset, val_dataset, test_dataset = \
             self.create_data_loaders(batch_size, augment=augment)
         
         # Create model
-        print(f"Creating {backbone} model...")
-        model = RatingPredictionModel(backbone=backbone, pretrained=True, dropout=0.3)
+        print(f"🏗️ Creating {backbone} model...")
+        model = RatingPredictionModel(backbone=backbone, pretrained=True, dropout=dropout)
         
         print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
         print(f"Trainable parameters: {sum(p.numel() for p in model.parameters() if p.requires_grad):,}")
@@ -579,6 +474,7 @@ class RatingPredictor:
                 'batch_size': batch_size,
                 'num_epochs': num_epochs,
                 'learning_rate': learning_rate,
+                'dropout': dropout,
                 'augment': augment
             },
             'dataset_info': {
@@ -603,16 +499,49 @@ class RatingPredictor:
         
         return model, results
 
+# ============================================================================
+# CENTRALIZED CONFIGURATION - Tek yerden kontrol
+# ============================================================================
+
+# Model Configuration
+MODEL_CONFIG = {
+    'backbone': 'efficientnet',        # Modeller: resnet18, resnet50, efficientnet
+    'batch_size': 16,                  
+    'num_epochs': 30,                  
+    'learning_rate': 0.005,            
+    'dropout': 0.5,                   
+    'augment': True,                   
+}
+
+# Dataset Configuration  
+DATASET_CONFIG = {
+    'dataset_dir': 'product_dataset',   # Veri dizini
+    'model_save_dir': 'models'          # Model kayıt dizini
+}
+
 # Usage example
 if __name__ == "__main__":
+    print("🚀 Amazon Rating Prediction Training")
+    print("=" * 50)
+    print(f"📋 Configuration:")
+    for key, value in MODEL_CONFIG.items():
+        print(f"   {key}: {value}")
+    print()
+    
     # Initialize trainer
-    trainer = RatingPredictor(dataset_dir='product_dataset', model_save_dir='models')
+    trainer = RatingPredictor(
+        dataset_dir=DATASET_CONFIG['dataset_dir'], 
+        model_save_dir=DATASET_CONFIG['model_save_dir']
+    )
     
     # Train and evaluate model
     model, results = trainer.train_and_evaluate(
-        backbone='efficientnet',
-        batch_size=32,
-        num_epochs=40, 
-        learning_rate=0.0003,
-        augment=True
+        backbone=MODEL_CONFIG['backbone'],
+        batch_size=MODEL_CONFIG['batch_size'],
+        num_epochs=MODEL_CONFIG['num_epochs'],
+        learning_rate=MODEL_CONFIG['learning_rate'],
+        augment=MODEL_CONFIG['augment'],
+        dropout=MODEL_CONFIG['dropout']
     )
+    
+    print(f"✅ Training completed! Results saved to {DATASET_CONFIG['model_save_dir']}")
