@@ -515,7 +515,7 @@ class RatingPredictor:
 # Model Configuration
 MODEL_CONFIG = {
     'backbone': 'resnet50',         # ResNet101 çok büyük, ResNet50 daha stabil
-    'batch_size': 16,               # 32 → 16 (VRAM'a uygun)
+    'batch_size': 8,               # 32 → 16 (VRAM'a uygun)
     'num_epochs': 50,               
     'learning_rate': 0.0001,        # 0.01 → 0.0001 (ÇOK ÖNEMLİ!)
     'dropout': 0.3,                 # Overfitting önleme
