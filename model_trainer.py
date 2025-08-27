@@ -85,12 +85,21 @@ class RatingPredictionModel(nn.Module):
             self.backbone = models.resnet18(pretrained=pretrained)
             num_features = self.backbone.fc.in_features
             self.backbone.fc = nn.Identity()
+        elif backbone == 'resnet101':
+            self.backbone = models.resnet101(pretrained=pretrained)
+            num_features = self.backbone.fc.in_features
+            self.backbone.fc = nn.Identity()
         elif backbone == 'efficientnet':
             self.backbone = models.efficientnet_b0(pretrained=pretrained)
             num_features = self.backbone.classifier[1].in_features
             self.backbone.classifier = nn.Identity()
+        elif backbone == 'efficientnet_b3':
+            self.backbone = models.efficientnet_b3(pretrained=pretrained)
+            num_features = self.backbone.classifier[1].in_features
+            self.backbone.classifier = nn.Identity()
         else:
             raise ValueError(f"Unsupported backbone: {backbone}")
+            print(f"Available backbones: resnet18, resnet50, resnet101, efficientnet, efficientnet_b3")
         
         # Custom classifier head
         self.classifier = nn.Sequential(
@@ -200,7 +209,7 @@ class RatingPredictor:
         """Train the rating prediction model"""
         
         # Loss and optimizer
-        criterion = nn.MSELoss()
+        criterion = nn.L1Loss()  # MAE'yi direkt optimize eder (L1 Loss)
         optimizer = optim.Adam(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode='min', factor=0.5, patience=patience//2, verbose=True
@@ -505,11 +514,11 @@ class RatingPredictor:
 
 # Model Configuration
 MODEL_CONFIG = {
-    'backbone': 'efficientnet',        # Modeller: resnet18, resnet50, efficientnet
-    'batch_size': 16,                  
-    'num_epochs': 30,                  
-    'learning_rate': 0.005,            
-    'dropout': 0.5,                   
+    'backbone': 'resnet50',         # ResNet101 çok büyük, ResNet50 daha stabil
+    'batch_size': 16,               # 32 → 16 (VRAM'a uygun)
+    'num_epochs': 50,               
+    'learning_rate': 0.0001,        # 0.01 → 0.0001 (ÇOK ÖNEMLİ!)
+    'dropout': 0.3,                 # Overfitting önleme
     'augment': True,                   
 }
 
