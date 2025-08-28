@@ -418,11 +418,15 @@ class ModelTesterUI:
     
     def setup_transforms(self):
         """Setup image transforms for inference"""
+        # Standard transforms for CNN models
         self.transform = transforms.Compose([
             transforms.Resize((224, 224)),
             transforms.ToTensor(),
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
+        
+        # ViT-specific transforms (will be set when ViT model is loaded)
+        self.vit_transform = None
     
     def update_status(self, message):
         """Update status bar message"""
@@ -484,70 +488,102 @@ class ModelTesterUI:
         if not model_path:
             return
         
-        # Also ask for vocabulary file
-        vocab_path = filedialog.askopenfilename(
-            title="Select Vocabulary File",
-            filetypes=[("JSON Files", "*.json"), ("Pickle Files", "*.pkl"), ("All Files", "*.*")]
-        )
-        
-        if not vocab_path:
-            messagebox.showwarning("Warning", "Vocabulary file is required for caption generation")
-            return
-        
         try:
             self.update_status("Loading caption model...")
-            
-            # Load vocabulary
-            if vocab_path.endswith('.json'):
-                with open(vocab_path, 'r') as f:
-                    self.caption_vocab = json.load(f)
-            else:
-                import pickle
-                with open(vocab_path, 'rb') as f:
-                    self.caption_vocab = pickle.load(f)
             
             # Load model checkpoint
             checkpoint = torch.load(model_path, map_location=self.device)
             
-            # Try to load model info
-            model_dir = os.path.dirname(model_path)
-            results_path = os.path.join(model_dir, 'caption_training_results.json')
-            
-            if os.path.exists(results_path):
-                with open(results_path, 'r') as f:
-                    self.caption_model_info = json.load(f)
-                config = self.caption_model_info['model_config']
+            # Check if vocabulary is in checkpoint
+            if 'vocab' in checkpoint:
+                self.caption_vocab = checkpoint['vocab']
+                print(f"✅ Vocabulary loaded from model file: {len(self.caption_vocab)} words")
             else:
-                # Default configuration
-                config = {
-                    'backbone': 'resnet50',
-                    'vocab_size': len(self.caption_vocab),
-                    'embed_dim': 512,
-                    'hidden_dim': 512,
-                    'num_layers': 2
-                }
-                self.caption_model_info = {'model_config': config}
+                # Ask for separate vocabulary file as fallback
+                messagebox.showinfo("Vocabulary Required", 
+                                  "This model file doesn't contain vocabulary.\nPlease select a vocabulary file.")
+                vocab_path = filedialog.askopenfilename(
+                    title="Select Vocabulary File",
+                    filetypes=[("JSON Files", "*.json"), ("Pickle Files", "*.pkl"), ("All Files", "*.*")]
+                )
+                
+                if not vocab_path:
+                    messagebox.showwarning("Warning", "Vocabulary file is required for caption generation")
+                    return
+                
+                # Load vocabulary from separate file
+                if vocab_path.endswith('.json'):
+                    with open(vocab_path, 'r') as f:
+                        self.caption_vocab = json.load(f)
+                else:
+                    import pickle
+                    with open(vocab_path, 'rb') as f:
+                        self.caption_vocab = pickle.load(f)
             
-            # Create and load model
-            self.caption_model = CaptionGenerationModel(
-                vocab_size=config['vocab_size'],
-                embed_dim=config.get('embed_dim', 512),
-                hidden_dim=config.get('hidden_dim', 512),
-                num_layers=config.get('num_layers', 2),
-                backbone=config.get('backbone', 'resnet50'),
-                pretrained=False
-            )
+            # Try to load model info from checkpoint or separate file
+            if 'model_config' in checkpoint:
+                self.caption_model_info = {'model_config': checkpoint['model_config']}
+            else:
+                model_dir = os.path.dirname(model_path)
+                results_path = os.path.join(model_dir, 'caption_training_results.json')
+                
+                if os.path.exists(results_path):
+                    with open(results_path, 'r') as f:
+                        self.caption_model_info = json.load(f)
+                else:
+                    # Create default configuration for ViT-Small + LSTM model
+                    self.caption_model_info = {
+                        'model_config': {
+                            'model_type': 'ViT-Small + LSTM',
+                            'vocab_size': len(self.caption_vocab),
+                            'embed_dim': 512,
+                            'hidden_dim': 256,
+                            'num_layers': 1
+                        }
+                    }
+            
+            config = self.caption_model_info['model_config']
+            vocab_size = len(self.caption_vocab)
+            
+            # For ViT-Small + LSTM models, use SimpleViTCaptionModel instead
+            if config.get('model_type') == 'ViT-Small + LSTM':
+                from caption_trainer import SimpleViTCaptionModel
+                
+                self.caption_model = SimpleViTCaptionModel(
+                    vocab_size=vocab_size,
+                    embed_dim=config.get('embed_dim', 512),
+                    hidden_dim=config.get('hidden_dim', 256),
+                    num_layers=config.get('num_layers', 1),
+                    dropout=config.get('dropout', 0.2)
+                )
+                
+                # Setup ViT image processor
+                from transformers import ViTImageProcessor
+                self.vit_image_processor = ViTImageProcessor.from_pretrained('WinKawaks/vit-small-patch16-224')
+                
+            else:
+                # Legacy CNN + LSTM model
+                self.caption_model = CaptionGenerationModel(
+                    vocab_size=vocab_size,
+                    embed_dim=config.get('embed_dim', 512),
+                    hidden_dim=config.get('hidden_dim', 512),
+                    num_layers=config.get('num_layers', 2),
+                    backbone=config.get('backbone', 'resnet50'),
+                    pretrained=False
+                )
             
             self.caption_model.load_state_dict(checkpoint['model_state_dict'])
             self.caption_model.to(self.device)
             self.caption_model.eval()
             
             # Update UI
+            model_type = config.get('model_type', 'Unknown')
             self.caption_status_label.config(text="✓ Loaded", fg='#27ae60')
             self.update_analyze_button()
             
-            self.update_status(f"Caption model loaded - {config.get('backbone', 'resnet50').upper()}")
-            messagebox.showinfo("Success", f"Caption model loaded!\nVocabulary size: {len(self.caption_vocab)}")
+            self.update_status(f"Caption model loaded - {model_type}")
+            messagebox.showinfo("Success", 
+                f"Caption model loaded!\nType: {model_type}\nVocabulary size: {vocab_size}")
             
         except Exception as e:
             messagebox.showerror("Error", f"Failed to load caption model:\n{str(e)}")
@@ -679,6 +715,16 @@ class ModelTesterUI:
         try:
             # Preprocess image
             image_rgb = self.current_image.convert('RGB')
+            
+            # Different preprocessing for different models
+            model_type = self.caption_model_info.get('model_config', {}).get('model_type', '') if self.caption_model else ''
+            
+            if 'ViT' in model_type and hasattr(self, 'vit_image_processor'):
+                # Use ViT image processor
+                vit_inputs = self.vit_image_processor(image_rgb, return_tensors="pt")
+                vit_input_tensor = vit_inputs['pixel_values'].to(self.device)
+            
+            # Standard CNN preprocessing for rating model
             input_tensor = self.transform(image_rgb).unsqueeze(0).to(self.device)
             
             # Rating prediction
@@ -696,8 +742,17 @@ class ModelTesterUI:
             # Caption generation
             if self.caption_model is not None:
                 with torch.no_grad():
-                    caption_tokens = self.caption_model(input_tensor)
-                    caption_text = self.decode_caption(caption_tokens[0])
+                    # Check if it's ViT-Small + LSTM model
+                    model_type = self.caption_model_info.get('model_config', {}).get('model_type', '')
+                    
+                    if 'ViT' in model_type and hasattr(self, 'vit_image_processor'):
+                        # ViT-Small + LSTM model - use ViT preprocessed input
+                        caption_tokens = self.caption_model(vit_input_tensor)  # No input_ids for generation
+                        caption_text = self.decode_vit_caption(caption_tokens[0])
+                    else:
+                        # Legacy CNN + LSTM model
+                        caption_tokens = self.caption_model(input_tensor)
+                        caption_text = self.decode_caption(caption_tokens[0])
                     
                 results['caption'] = caption_text
             
@@ -706,6 +761,34 @@ class ModelTesterUI:
             
         except Exception as e:
             self.root.after(0, self._analysis_error, str(e))
+    
+    def decode_vit_caption(self, token_sequence):
+        """Decode token sequence from ViT-Small + LSTM model"""
+        if self.caption_vocab is None:
+            return "Error: No vocabulary loaded"
+        
+        # For ViT models, vocab is a simple dict {word: index}
+        idx_to_word = {idx: word for word, idx in self.caption_vocab.items()}
+        
+        # Decode tokens
+        words = []
+        for token in token_sequence:
+            token_id = token.item() if hasattr(token, 'item') else int(token)
+            
+            if token_id in idx_to_word:
+                word = idx_to_word[token_id]
+                # Skip special tokens
+                if word in ['<PAD>', '<START>', '<END>', '<UNK>']:
+                    if word == '<END>':
+                        break
+                    continue
+                words.append(word)
+            else:
+                # Skip unknown tokens
+                continue
+        
+        caption = ' '.join(words)
+        return caption.strip() if caption.strip() else "Unable to generate caption"
     
     def decode_caption(self, token_sequence):
         """Decode token sequence to text caption"""

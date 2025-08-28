@@ -13,3 +13,4 @@ src/meta_Amazon_Fashion_shrunk_300k.jsonl
 *.tiff
 *.svg
 analysis_results/analysisResults.txt
+*.pth
