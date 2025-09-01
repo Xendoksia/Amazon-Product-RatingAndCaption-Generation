@@ -2,6 +2,23 @@
 
 This project contains deep learning models for rating prediction and caption generation from Amazon product images.
 
+
+
+<img width="1387" height="922" alt="Ekran görüntüsü 2025-08-31 142619" src="https://github.com/user-attachments/assets/68770eba-e12b-4042-b06b-6a28e3363e52" />
+
+
+
+
+
+
+<img width="1153" height="877" alt="Ekran görüntüsü 2025-08-31 142517" src="https://github.com/user-attachments/assets/518c5a18-22f6-4c08-a867-480483866371" />
+
+
+
+
+
+
+
 ## Project Overview
 
 - **Rating Prediction**: Predicts 1-5 star ratings from product images
